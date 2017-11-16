@@ -41,12 +41,6 @@ static DEFINE_MUTEX(zram_index_mutex);
 static int zram_major;
 static const char *default_compressor = "lzo";
 
-/*
- * We don't need to see memory allocation errors more than once every 1
- * second to know that a problem is occurring.
- */
-#define ALLOC_ERROR_LOG_RATE_MS 1000
-
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
 
@@ -126,14 +120,6 @@ static inline bool is_partial_io(struct bio_vec *bvec)
 	return false;
 }
 #endif
-
-static void zram_revalidate_disk(struct zram *zram)
-{
-	revalidate_disk(zram->disk);
-	/* revalidate_disk reset the BDI_CAP_STABLE_WRITES so set again */
-	zram->disk->queue->backing_dev_info->capabilities |=
-		BDI_CAP_STABLE_WRITES;
-}
 
 /*
  * Check if request is within bounds and aligned on zram logical blocks.
@@ -1388,7 +1374,8 @@ static ssize_t disksize_store(struct device *dev,
 	zram->comp = comp;
 	zram->disksize = disksize;
 	set_capacity(zram->disk, zram->disksize >> SECTOR_SHIFT);
-	zram_revalidate_disk(zram);
+
+	revalidate_disk(zram->disk);
 	up_write(&zram->init_lock);
 
 	return len;
@@ -1435,7 +1422,7 @@ static ssize_t reset_store(struct device *dev,
 	/* Make sure all the pending I/O are finished */
 	fsync_bdev(bdev);
 	zram_reset_device(zram);
-	zram_revalidate_disk(zram);
+	revalidate_disk(zram->disk);
 	bdput(bdev);
 
 	mutex_lock(&bdev->bd_mutex);
@@ -1501,11 +1488,6 @@ static const struct attribute_group zram_disk_attr_group = {
 	.attrs = zram_disk_attrs,
 };
 
-static const struct attribute_group *zram_disk_attr_groups[] = {
-	&zram_disk_attr_group,
-	NULL,
-};
-
 /*
  * Allocate and initialize new zram device. the function returns
  * '>= 0' device_id upon success, and negative value otherwise.
@@ -1554,12 +1536,12 @@ static int zram_add(void)
 	zram->disk->private_data = zram;
 	snprintf(zram->disk->disk_name, 16, "zram%d", device_id);
 
-	__set_bit(QUEUE_FLAG_FAST, &zram->disk->queue->queue_flags);
 	/* Actual capacity set using syfs (/sys/block/zram<id>/disksize */
 	set_capacity(zram->disk, 0);
 	/* zram devices sort of resembles non-rotational disks */
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, zram->disk->queue);
 	queue_flag_clear_unlocked(QUEUE_FLAG_ADD_RANDOM, zram->disk->queue);
+
 	/*
 	 * To ensure that we always get PAGE_SIZE aligned
 	 * and n*PAGE_SIZED sized I/O requests.
@@ -1585,14 +1567,25 @@ static int zram_add(void)
 		zram->disk->queue->limits.discard_zeroes_data = 0;
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, zram->disk->queue);
 
-	disk_to_dev(zram->disk)->groups = zram_disk_attr_groups;
+	zram->disk->queue->backing_dev_info.capabilities |=
+					BDI_CAP_STABLE_WRITES;
 	add_disk(zram->disk);
 
+	ret = sysfs_create_group(&disk_to_dev(zram->disk)->kobj,
+				&zram_disk_attr_group);
+	if (ret < 0) {
+		pr_err("Error creating sysfs group for device %d\n",
+				device_id);
+		goto out_free_disk;
+	}
 	strlcpy(zram->compressor, default_compressor, sizeof(zram->compressor));
 
 	pr_info("Added device: %s\n", zram->disk->disk_name);
 	return device_id;
 
+out_free_disk:
+	del_gendisk(zram->disk);
+	put_disk(zram->disk);
 out_free_queue:
 	blk_cleanup_queue(queue);
 out_free_idr:
@@ -1619,6 +1612,16 @@ static int zram_remove(struct zram *zram)
 
 	zram->claim = true;
 	mutex_unlock(&bdev->bd_mutex);
+
+	/*
+	 * Remove sysfs first, so no one will perform a disksize
+	 * store while we destroy the devices. This also helps during
+	 * hot_remove -- zram_reset_device() is the last holder of
+	 * ->init_lock, no later/concurrent disksize_store() or any
+	 * other sysfs handlers are possible.
+	 */
+	sysfs_remove_group(&disk_to_dev(zram->disk)->kobj,
+			&zram_disk_attr_group);
 
 	/* Make sure all the pending I/O are finished */
 	fsync_bdev(bdev);
