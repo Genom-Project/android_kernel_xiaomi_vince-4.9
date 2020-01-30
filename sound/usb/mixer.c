@@ -801,17 +801,7 @@ static int __check_input_term(struct mixer_build *state, int id,
 			term->name = uac_mixer_unit_iMixer(d);
 			return 0;
 		}
-		case UAC_SELECTOR_UNIT: {
-			struct uac_selector_unit_descriptor *d = p1;
-			/* call recursively to retrieve the channel info */
-			err = __check_input_term(state, d->baSourceID[0], term);
-			if (err < 0)
-				return err;
-			term->type = d->bDescriptorSubtype << 16; /* virtual type */
-			term->id = id;
-			term->name = uac_selector_unit_iSelector(d);
-			return 0;
-		}
+		case UAC_SELECTOR_UNIT:
 		/* UAC3_MIXER_UNIT_V3 */
 		case UAC2_CLOCK_SELECTOR:
 		/* UAC3_CLOCK_SOURCE */ {
@@ -1984,7 +1974,9 @@ static int parse_audio_mixer_unit(struct mixer_build *state, int unitid,
 	} else {
 		input_pins = desc->bNrInPins;
 		num_outs = uac_mixer_unit_bNrChannels(desc);
-		if (desc->bLength < 11 || !input_pins || !num_outs) {
+		if (desc->bLength < 11 || !input_pins ||
+		    desc->bLength < sizeof(*desc) + desc->bNrInPins ||
+		    !num_outs) {
 			usb_audio_err(state->chip,
 				      "invalid MIXER UNIT descriptor %d\n",
 				      unitid);
@@ -2995,7 +2987,9 @@ int snd_usb_create_mixer(struct snd_usb_audio *chip, int ctrlif,
 	    (err = snd_usb_mixer_status_create(mixer)) < 0)
 		goto _error;
 
-	snd_usb_mixer_apply_create_quirk(mixer);
+	err = snd_usb_mixer_apply_create_quirk(mixer);
+	if (err < 0)
+		goto _error;
 
 	err = snd_device_new(chip->card, SNDRV_DEV_CODEC, mixer, &dev_ops);
 	if (err < 0)
