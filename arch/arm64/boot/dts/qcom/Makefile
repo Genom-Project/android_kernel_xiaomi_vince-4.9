@@ -379,12 +379,7 @@ dtbo-$(CONFIG_ARCH_SDM632) += sdm632-rumi-overlay.dtbo \
 	sdm450-qrd-sku4-overlay.dtbo \
 	sdm632-qrd-overlay.dtbo
 
-dtbo-$(CONFIG_ARCH_SDM439) += sdm439-mtp-overlay.dtbo \
-	sdm439-cdp-overlay.dtbo \
-	sdm439-qrd-overlay.dtbo \
-	sdm439-qrd-olive-overlay.dtbo \
-	sdm439-external-codec-mtp-overlay.dtbo \
-	sdm439-rcm-overlay.dtbo
+dtbo-$(CONFIG_ARCH_SDM439) += sdm439-qrd-olive-overlay.dtbo
 
 dtbo-$(CONFIG_ARCH_SDM429) += sdm429-mtp-overlay.dtbo \
 	sdm429-cdp-overlay.dtbo \
