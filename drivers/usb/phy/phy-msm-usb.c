@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2018, Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2019, Linux Foundation. All rights reserved.
  * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -880,6 +880,8 @@ static void msm_usb_phy_reset(struct msm_otg *motg)
 	mb();
 }
 
+static void msm_chg_block_on(struct msm_otg *);
+
 static int msm_otg_reset(struct usb_phy *phy)
 {
 	struct msm_otg *motg = container_of(phy, struct msm_otg, phy);
@@ -977,6 +979,9 @@ static int msm_otg_reset(struct usb_phy *phy)
 	 * Disable USB BAM as block reset resets USB BAM registers.
 	 */
 	msm_usb_bam_enable(CI_CTRL, false);
+
+	if (phy->otg->state == OTG_STATE_UNDEFINED && motg->rm_pulldown)
+		msm_chg_block_on(motg);
 
 	return 0;
 }
@@ -2189,28 +2194,6 @@ static int msm_otg_set_host(struct usb_otg *otg, struct usb_bus *host)
 	return 0;
 }
 
-static void msm_chg_block_on(struct msm_otg *motg)
-{
-	struct usb_phy *phy = &motg->phy;
-	u32 func_ctrl;
-
-	/* put the controller in non-driving mode */
-	func_ctrl = ulpi_read(phy, ULPI_FUNC_CTRL);
-	dev_err(motg->phy.dev, "non-drive mode value 0x%x\n", func_ctrl);
-	func_ctrl &= ~ULPI_FUNC_CTRL_OPMODE_MASK;
-	func_ctrl |= ULPI_FUNC_CTRL_OPMODE_NONDRIVING;
-	ulpi_write(phy, func_ctrl, ULPI_FUNC_CTRL);
-
-	/* disable DP and DM pull down resistors */
-	ulpi_write(phy, 0x6, 0xC);
-	/* Clear charger detecting control bits */
-	ulpi_write(phy, 0x1F, 0x86);
-	/* Clear alt interrupt latch and enable bits */
-	ulpi_write(phy, 0x1F, 0x92);
-	ulpi_write(phy, 0x1F, 0x95);
-	udelay(100);
-}
-
 static void msm_otg_start_peripheral(struct usb_otg *otg, int on)
 {
 	struct msm_otg *motg = container_of(otg->usb_phy, struct msm_otg, phy);
@@ -2481,6 +2464,28 @@ static void msm_chg_enable_dcd(struct msm_otg *motg)
 	ulpi_write(phy, 0x10, 0x85);
 }
 
+static void msm_chg_block_on(struct msm_otg *motg)
+{
+	struct usb_phy *phy = &motg->phy;
+	u32 func_ctrl;
+
+	/* put the controller in non-driving mode */
+	msm_otg_dbg_log_event(&motg->phy, "PHY NON DRIVE", 0, 0);
+	func_ctrl = ulpi_read(phy, ULPI_FUNC_CTRL);
+	func_ctrl &= ~ULPI_FUNC_CTRL_OPMODE_MASK;
+	func_ctrl |= ULPI_FUNC_CTRL_OPMODE_NONDRIVING;
+	ulpi_write(phy, func_ctrl, ULPI_FUNC_CTRL);
+
+	/* disable DP and DM pull down resistors */
+	ulpi_write(phy, 0x6, 0xC);
+	/* Clear charger detecting control bits */
+	ulpi_write(phy, 0x1F, 0x86);
+	/* Clear alt interrupt latch and enable bits */
+	ulpi_write(phy, 0x1F, 0x92);
+	ulpi_write(phy, 0x1F, 0x95);
+	udelay(100);
+}
+
 static void msm_chg_block_off(struct msm_otg *motg)
 {
 	struct usb_phy *phy = &motg->phy;
@@ -2495,10 +2500,34 @@ static void msm_chg_block_off(struct msm_otg *motg)
 	ulpi_write(phy, 0x6, 0xB);
 
 	/* put the controller in normal mode */
+	msm_otg_dbg_log_event(&motg->phy, "PHY MODE NORMAL", 0, 0);
 	func_ctrl = ulpi_read(phy, ULPI_FUNC_CTRL);
 	func_ctrl &= ~ULPI_FUNC_CTRL_OPMODE_MASK;
 	func_ctrl |= ULPI_FUNC_CTRL_OPMODE_NORMAL;
 	ulpi_write(phy, func_ctrl, ULPI_FUNC_CTRL);
+}
+
+static void msm_otg_set_mode_nondriving(struct msm_otg *motg,
+					bool mode_nondriving)
+{
+	clk_prepare_enable(motg->xo_clk);
+	clk_prepare_enable(motg->phy_csr_clk);
+	clk_prepare_enable(motg->core_clk);
+	clk_prepare_enable(motg->pclk);
+
+	msm_otg_exit_phy_retention(motg);
+
+	if (mode_nondriving)
+		msm_chg_block_on(motg);
+	else
+		msm_chg_block_off(motg);
+
+	msm_otg_enter_phy_retention(motg);
+
+	clk_disable_unprepare(motg->pclk);
+	clk_disable_unprepare(motg->core_clk);
+	clk_disable_unprepare(motg->phy_csr_clk);
+	clk_disable_unprepare(motg->xo_clk);
 }
 
 #define MSM_CHG_DCD_TIMEOUT		(750 * HZ/1000) /* 750 msec */
@@ -3359,14 +3388,23 @@ static int msm_otg_dpdm_regulator_enable(struct regulator_dev *rdev)
 {
 	int ret = 0;
 	struct msm_otg *motg = rdev_get_drvdata(rdev);
+	struct usb_phy *phy = &motg->phy;
 
 	if (!motg->rm_pulldown) {
+		msm_otg_dbg_log_event(&motg->phy, "Disable Pulldown",
+				      motg->rm_pulldown, 0);
 		ret = msm_hsusb_ldo_enable(motg, USB_PHY_REG_3P3_ON);
-		if (!ret) {
-			motg->rm_pulldown = true;
-			msm_otg_dbg_log_event(&motg->phy, "RM Pulldown",
-					motg->rm_pulldown, 0);
-		}
+		if (ret)
+			return ret;
+
+		motg->rm_pulldown = true;
+		/* Don't reset h/w if previous disconnect handling is pending */
+		if (phy->otg->state == OTG_STATE_B_IDLE ||
+		    phy->otg->state == OTG_STATE_UNDEFINED)
+			msm_otg_set_mode_nondriving(motg, true);
+		else
+			msm_otg_dbg_log_event(&motg->phy, "NonDrv err",
+					      motg->rm_pulldown, 0);
 	}
 
 	return ret;
@@ -3376,14 +3414,21 @@ static int msm_otg_dpdm_regulator_disable(struct regulator_dev *rdev)
 {
 	int ret = 0;
 	struct msm_otg *motg = rdev_get_drvdata(rdev);
+	struct usb_phy *phy = &motg->phy;
 
 	if (motg->rm_pulldown) {
+		/* Let sm_work handle it if USB core is active */
+		if (phy->otg->state == OTG_STATE_B_IDLE ||
+		    phy->otg->state == OTG_STATE_UNDEFINED)
+			msm_otg_set_mode_nondriving(motg, false);
+
 		ret = msm_hsusb_ldo_enable(motg, USB_PHY_REG_3P3_OFF);
-		if (!ret) {
-			motg->rm_pulldown = false;
-			msm_otg_dbg_log_event(&motg->phy, "RM Pulldown",
-					motg->rm_pulldown, 0);
-		}
+		if (ret)
+			return ret;
+
+		motg->rm_pulldown = false;
+		msm_otg_dbg_log_event(&motg->phy, "EN Pulldown",
+				      motg->rm_pulldown, 0);
 	}
 
 	return ret;

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -366,7 +366,7 @@ static int32_t qpnp_vadc_status_debug(struct qpnp_vadc_chip *vadc)
 }
 
 static int qpnp_vadc_hc_check_conversion_status(struct qpnp_vadc_chip *vadc,
-     bool poll)
+		bool poll)
 {
 	int rc = 0, count = 0, retry;
 	u8 status1 = 0;
@@ -750,7 +750,7 @@ int32_t qpnp_vadc_hc_read(struct qpnp_vadc_chip *vadc,
 				QPNP_VADC_CAL_DELAY_CTL_1, &val, 1);
 		if (rc < 0) {
 			pr_err("qpnp adc write cal_delay failed with %d\n", rc);
-			return rc;
+			goto fail_unlock;
 		}
 	}
 

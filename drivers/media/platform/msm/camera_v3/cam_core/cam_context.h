@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,9 @@
 
 /* Forward declarations */
 struct cam_context;
+
+/* max device name string length*/
+#define CAM_CTX_DEV_NAME_MAX_LENGTH 20
 
 /* max request number */
 #define CAM_CTX_REQ_MAX              20
@@ -89,6 +92,7 @@ struct cam_ctx_request {
  * @flush_dev:             Function pointer for flush device
  * @acquire_hw:            Function pointer for acquire hw
  * @release_hw:            Function pointer for release hw
+ * @dump_dev:              Function pointer for dump dev
  *
  */
 struct cam_ctx_ioctl_ops {
@@ -106,6 +110,9 @@ struct cam_ctx_ioctl_ops {
 			struct cam_flush_dev_cmd *cmd);
 	int (*acquire_hw)(struct cam_context *ctx, void *args);
 	int (*release_hw)(struct cam_context *ctx, void *args);
+	int (*dump_dev)(struct cam_context *ctx,
+			struct cam_dump_req_cmd *cmd);
+
 };
 
 /**
@@ -117,6 +124,7 @@ struct cam_ctx_ioctl_ops {
  * @apply_req:             Apply setting for the context
  * @flush_req:             Flush request to remove request ids
  * @process_evt:           Handle event notification from CRM.(optional)
+ * @dump_req:              Dump information for the issue request
  *
  */
 struct cam_ctx_crm_ops {
@@ -132,6 +140,8 @@ struct cam_ctx_crm_ops {
 			struct cam_req_mgr_flush_request *flush);
 	int (*process_evt)(struct cam_context *ctx,
 			struct cam_req_mgr_link_evt_data *evt_data);
+	int (*dump_req)(struct cam_context *ctx,
+			struct cam_req_mgr_dump_info *dump);
 };
 
 
@@ -184,7 +194,7 @@ struct cam_ctx_ops {
  *
  */
 struct cam_context {
-	const char                  *dev_name;
+	char                         dev_name[CAM_CTX_DEV_NAME_MAX_LENGTH];
 	uint64_t                     dev_id;
 	uint32_t                     ctx_id;
 	struct list_head             list;
@@ -302,6 +312,18 @@ int cam_context_handle_crm_process_evt(struct cam_context *ctx,
 	struct cam_req_mgr_link_evt_data *process_evt);
 
 /**
+ * cam_context_handle_crm_dump_req()
+ *
+ * @brief:        Handle CRM dump request
+ *
+ * @ctx:          Object pointer for cam_context
+ * @dump:         Request to dump
+ *
+ */
+int cam_context_handle_crm_dump_req(struct cam_context *ctx,
+	struct cam_req_mgr_dump_info *dump);
+
+/**
  * cam_context_dump_pf_info()
  *
  * @brief:        Handle dump active request request command
@@ -409,6 +431,19 @@ int cam_context_handle_start_dev(struct cam_context *ctx,
  */
 int cam_context_handle_stop_dev(struct cam_context *ctx,
 		struct cam_start_stop_dev_cmd *cmd);
+
+
+/**
+ * cam_context_handle_dump_dev()
+ *
+ * @brief:        Handle dump device command
+ *
+ * @ctx:          Object pointer for cam_context
+ * @cmd:          Dump device command payload
+ *
+ */
+int cam_context_handle_dump_dev(struct cam_context *ctx,
+	struct cam_dump_req_cmd *cmd);
 
 /**
  * cam_context_deinit()

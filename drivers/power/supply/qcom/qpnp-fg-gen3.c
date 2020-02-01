@@ -936,6 +936,11 @@ static int fg_get_prop_capacity(struct fg_chip *chip, int *val)
 	return 0;
 }
 
+static int fg_get_prop_real_capacity(struct fg_chip *chip, int *val)
+{
+	return fg_get_msoc(chip, val);
+}
+
 #define DEFAULT_BATT_TYPE	"Unknown Battery"
 #define MISSING_BATT_TYPE	"Missing Battery"
 #define LOADING_BATT_TYPE	"Loading Battery"
@@ -2748,7 +2753,25 @@ out:
 	mutex_unlock(&chip->cyc_ctr.lock);
 }
 
-static const char *fg_get_cycle_count(struct fg_chip *chip)
+static int fg_get_cycle_count(struct fg_chip *chip)
+{
+	int i, len = 0;
+
+	if (!chip->cyc_ctr.en)
+		return 0;
+
+	mutex_lock(&chip->cyc_ctr.lock);
+	for (i = 0; i < BUCKET_COUNT; i++)
+		len += chip->cyc_ctr.count[i];
+
+	mutex_unlock(&chip->cyc_ctr.lock);
+
+	len = len / BUCKET_COUNT;
+
+	return len;
+}
+
+static const char *fg_get_cycle_counts(struct fg_chip *chip)
 {
 	int i, len = 0;
 	char *buf;
@@ -4037,8 +4060,11 @@ static int fg_psy_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
 		pval->intval = chip->bp.float_volt_uv;
 		break;
+	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		pval->intval = fg_get_cycle_count(chip);
+		break;
 	case POWER_SUPPLY_PROP_CYCLE_COUNTS:
-		pval->strval = fg_get_cycle_count(chip);
+		pval->strval = fg_get_cycle_counts(chip);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW_RAW:
 		rc = fg_get_charge_raw(chip, &pval->intval);
@@ -4083,6 +4109,9 @@ static int fg_psy_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CC_STEP_SEL:
 		pval->intval = chip->ttf.cc_step.sel;
+		break;
+	case POWER_SUPPLY_PROP_REAL_CAPACITY:
+		rc = fg_get_prop_real_capacity(chip, &pval->intval);
 		break;
 	default:
 		pr_err("unsupported property %d\n", psp);
@@ -4273,6 +4302,7 @@ static enum power_supply_property fg_psy_props[] = {
 	POWER_SUPPLY_PROP_BATTERY_TYPE,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
+	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_CYCLE_COUNTS,
 	POWER_SUPPLY_PROP_CHARGE_NOW_RAW,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
@@ -4286,6 +4316,7 @@ static enum power_supply_property fg_psy_props[] = {
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
 	POWER_SUPPLY_PROP_CC_STEP,
 	POWER_SUPPLY_PROP_CC_STEP_SEL,
+	POWER_SUPPLY_PROP_REAL_CAPACITY,
 };
 
 static const struct power_supply_desc fg_psy_desc = {

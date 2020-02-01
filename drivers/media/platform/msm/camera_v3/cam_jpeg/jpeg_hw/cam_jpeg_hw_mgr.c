@@ -156,6 +156,12 @@ static int cam_jpeg_mgr_process_irq(void *priv, void *data)
 
 	cmd_buf_kaddr = (uint32_t *)kaddr;
 
+	if ((p_cfg_req->hw_cfg_args.hw_update_entries[CAM_JPEG_PARAM].offset /
+			sizeof(uint32_t)) >= cmd_buf_len) {
+		CAM_ERR(CAM_JPEG, "Not enough buf");
+		return -EINVAL;
+	}
+
 	cmd_buf_kaddr =
 		(cmd_buf_kaddr +
 		(p_cfg_req->hw_cfg_args.hw_update_entries[CAM_JPEG_PARAM].offset
@@ -628,8 +634,13 @@ static void cam_jpeg_mgr_print_io_bufs(struct cam_packet *packet,
 
 	for (i = 0; i < packet->num_io_configs; i++) {
 		for (j = 0; j < CAM_PACKET_MAX_PLANES; j++) {
-			if (!io_cfg[i].mem_handle[j])
+			if (!io_cfg[i].mem_handle[j]) {
+				CAM_ERR(CAM_JPEG,
+					"Mem Handle %d is NULL for %d io config",
+					j, i);
 				break;
+			}
+
 
 			if (GET_FD_FROM_HANDLE(io_cfg[i].mem_handle[j]) ==
 				GET_FD_FROM_HANDLE(pf_buf_info)) {
@@ -740,7 +751,7 @@ static int cam_jpeg_mgr_prepare_hw_update(void *hw_mgr_priv,
 		(void *)packet, (void *)cmd_desc,
 		sizeof(struct cam_cmd_buf_desc));
 
-	rc = cam_packet_util_process_patches(packet, hw_mgr->iommu_hdl, -1);
+	rc = cam_packet_util_process_patches(packet, hw_mgr->iommu_hdl, -1, 0);
 	if (rc) {
 		CAM_ERR(CAM_JPEG, "Patch processing failed %d", rc);
 		return rc;

@@ -169,6 +169,7 @@ unsigned int sysctl_sched_capacity_margin_down = 1205; /* ~15% margin */
 #ifdef CONFIG_SCHED_WALT
 unsigned int sysctl_sched_min_task_util_for_boost_colocation;
 #endif
+static unsigned int __maybe_unused sched_small_task_threshold = 102;
 
 static inline void update_load_add(struct load_weight *lw, unsigned long inc)
 {
@@ -3909,6 +3910,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct sched_entity *left = __pick_first_entity(cfs_rq);
 	struct sched_entity *se;
+	bool strict_skip = false;
 
 	/*
 	 * If curr is set we have to see if its left of the leftmost entity
@@ -3928,13 +3930,16 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 		if (se == curr) {
 			second = __pick_first_entity(cfs_rq);
+			if (sched_feat(STRICT_SKIP_BUDDY))
+				strict_skip = true;
 		} else {
 			second = __pick_next_entity(se);
 			if (!second || (curr && entity_before(curr, second)))
 				second = curr;
 		}
 
-		if (second && wakeup_preempt_entity(second, left) < 1)
+		if (second && (strict_skip ||
+		    wakeup_preempt_entity(second, left) < 1))
 			se = second;
 	}
 
@@ -6166,6 +6171,12 @@ static inline bool task_fits_max(struct task_struct *p, int cpu)
 	return __task_fits(p, cpu, 0);
 }
 
+static inline bool cpu_check_overutil_condition(int cpu,
+						unsigned long util)
+{
+	return (capacity_orig_of(cpu) * 1024) < (util * capacity_margin);
+}
+
 bool __cpu_overutilized(int cpu, int delta)
 {
 	return (capacity_orig_of(cpu) * 1024) <
@@ -7015,7 +7026,7 @@ retry:
 			 */
 			min_capped_util = max(new_util, capacity_min_of(i));
 
-			if (new_util > capacity_orig)
+			if (cpu_check_overutil_condition(i, new_util))
 				continue;
 
 			/*
@@ -8543,7 +8554,17 @@ redo:
 		if (sched_feat(LB_MIN) && load < 16 && !env->sd->nr_balance_failed)
 			goto next;
 
-		if ((load / 2) > env->imbalance)
+		/*
+		 * p is not running task when we goes until here, so if p is one
+		 * of the 2 task in src cpu rq and not the running one,
+		 * that means it is the only task that can be balanced.
+		 * So only when there is other tasks can be balanced or
+		 * there is situation to ignore big task, it is needed
+		 * to skip the task load bigger than 2*imbalance.
+		 */
+		if (((cpu_rq(env->src_cpu)->nr_running > 2) ||
+			(env->flags & LBF_IGNORE_BIG_TASKS)) &&
+			((load / 2) > env->imbalance))
 			goto next;
 
 		detach_task(p, env);
@@ -9854,6 +9875,18 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 
 		capacity = capacity_of(i);
 
+		/*
+		 * For ASYM_CPUCAPACITY domains, don't pick a cpu that could
+		 * eventually lead to active_balancing high->low capacity.
+		 * Higher per-cpu capacity is considered better than balancing
+		 * average load.
+		 */
+		if (env->sd->flags & SD_ASYM_CPUCAPACITY &&
+		    capacity_of(env->dst_cpu) < capacity &&
+		    (rq->nr_running == 1 || (rq->nr_running == 2 &&
+		     task_util(rq->curr) < sched_small_task_threshold)))
+			continue;
+
 		wl = weighted_cpuload(i);
 
 		/*
@@ -9935,8 +9968,10 @@ static int need_active_balance(struct lb_env *env)
 	 * It's worth migrating the task if the src_cpu's capacity is reduced
 	 * because of other sched_class or IRQs if more capacity stays
 	 * available on dst_cpu.
+	 * Avoid pulling the CFS task if it is the only task running.
 	 */
 	if ((env->idle != CPU_NOT_IDLE) &&
+	    (env->src_rq->nr_running > 1) &&
 	    (env->src_rq->cfs.h_nr_running == 1)) {
 		if ((check_cpu_capacity(env->src_rq, sd)) &&
 		    (capacity_of(env->src_cpu)*sd->imbalance_pct < capacity_of(env->dst_cpu)*100))
@@ -10228,6 +10263,7 @@ no_move:
 				busiest->active_balance = 1;
 				busiest->push_cpu = this_cpu;
 				active_balance = 1;
+				mark_reserved(this_cpu);
 			}
 			raw_spin_unlock_irqrestore(&busiest->lock, flags);
 
@@ -10328,6 +10364,27 @@ update_next_balance(struct sched_domain *sd, unsigned long *next_balance)
 		*next_balance = next;
 }
 
+#ifdef CONFIG_SCHED_WALT
+static inline bool min_cap_cluster_has_misfit_task(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		if (!is_min_capacity_cpu(cpu))
+			break;
+		if (cpu_rq(cpu)->walt_stats.nr_big_tasks)
+			return true;
+	}
+
+	return false;
+}
+#else
+static inline bool min_cap_cluster_has_misfit_task(void)
+{
+	return false;
+}
+#endif
+
 /*
  * idle_balance is called by schedule() if this_cpu is about to become
  * idle. Attempts to pull tasks from other CPUs.
@@ -10339,9 +10396,17 @@ static int idle_balance(struct rq *this_rq)
 	struct sched_domain *sd;
 	int pulled_task = 0;
 	u64 curr_cost = 0;
+	bool force_lb = false;
 
 	if (cpu_isolated(this_cpu))
 		return 0;
+
+	/*
+	 * Force higher capacity CPUs doing load balance, when the lower
+	 * capacity CPUs has some misfit tasks.
+	 */
+	if (!is_min_capacity_cpu(this_cpu) && min_cap_cluster_has_misfit_task())
+		force_lb = true;
 
 	/*
 	 * We must set idle_stamp _before_ calling idle_balance(), such that we
@@ -10349,7 +10414,7 @@ static int idle_balance(struct rq *this_rq)
 	 */
 	this_rq->idle_stamp = rq_clock(this_rq);
 
-	if (!energy_aware() &&
+	if (!energy_aware() && !force_lb &&
 	    (this_rq->avg_idle < sysctl_sched_migration_cost ||
 	     !this_rq->rd->overload)) {
 		rcu_read_lock();
@@ -10372,7 +10437,8 @@ static int idle_balance(struct rq *this_rq)
 		if (!(sd->flags & SD_LOAD_BALANCE))
 			continue;
 
-		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost) {
+		if (!force_lb &&
+		    this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost) {
 			update_next_balance(sd, &next_balance);
 			break;
 		}
@@ -10522,6 +10588,7 @@ out_unlock:
 	busiest_rq->active_balance = 0;
 	push_task = busiest_rq->push_task;
 	target_cpu = busiest_rq->push_cpu;
+	clear_reserved(target_cpu);
 
 	if (push_task)
 		busiest_rq->push_task = NULL;
@@ -10532,7 +10599,6 @@ out_unlock:
 		if (push_task_detached)
 			attach_one_task(target_rq, push_task);
 		put_task_struct(push_task);
-		clear_reserved(target_cpu);
 	}
 
 	if (p)
