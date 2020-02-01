@@ -3,6 +3,10 @@ ifeq ($(CONFIG_ARCH_SDM845), y)
 include $(srctree)/techpack/audio/config/sdm845auto.conf
 export
 endif
+ifeq ($(CONFIG_ARCH_SDM439), y)
+include $(srctree)/techpack/audio/config/sdm439auto.conf
+export
+endif
 ifeq ($(CONFIG_ARCH_SDM450), y)
 include $(srctree)/techpack/audio/config/sdm450auto.conf
 export
@@ -29,6 +33,10 @@ LINUXINCLUDE    += \
 ifeq ($(CONFIG_ARCH_SDM845), y)
 LINUXINCLUDE    += \
                 -include $(srctree)/techpack/audio/config/sdm845autoconf.h
+endif
+ifeq ($(CONFIG_ARCH_SDM439), y)
+LINUXINCLUDE    += \
+                -include $(srctree)/techpack/audio/config/sdm439autoconf.h
 endif
 ifeq ($(CONFIG_ARCH_SDM450), y)
 LINUXINCLUDE    += \
